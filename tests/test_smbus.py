@@ -156,3 +156,26 @@ def test_loads_eeprom(emulated_device):
     spd.joinpath('name').write_text('name\n')
 
     assert bus.load_eeprom(0x51) == ('name', b'012345')
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_pci_parent_metadata(tmp_path, legacy):
+    pci = tmp_path / 'devices' / '0000:08:00.0'
+    pci.mkdir(parents=True)
+    adapter = pci / 'i2c-1'
+    adapter.mkdir()
+    (adapter / 'name').write_text('NVIDIA i2c adapter 1 at 8:00.0\n')
+    if legacy:
+        (adapter / 'device').symlink_to(pci, target_is_directory=True)
+    for name, value in [('vendor', '0x10de'), ('device', '0x2482'),
+                        ('subsystem_vendor', '0x1043'), ('subsystem_device', '0x880e')]:
+        (pci / name).write_text(value + '\n')
+    (pci / 'driver').symlink_to('/sys/bus/pci/drivers/nvidia')
+    link = tmp_path / 'i2c-1'
+    link.symlink_to(adapter, target_is_directory=True)
+    bus = LinuxI2cBus(link)
+    assert bus.parent_vendor == 0x10de
+    assert bus.parent_device == 0x2482
+    assert bus.parent_subsystem_vendor == 0x1043
+    assert bus.parent_subsystem_device == 0x880e
+    assert bus.parent_driver == 'nvidia'

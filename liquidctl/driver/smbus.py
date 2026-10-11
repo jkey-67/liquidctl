@@ -190,24 +190,24 @@ if sys.platform == 'linux':
 
         @property
         def parent_vendor(self):
-            return self._try_sysfs_read_hex('device/vendor')
+            return self._try_parent_read_hex('vendor')
 
         @property
         def parent_device(self):
-            return self._try_sysfs_read_hex('device/device')
+            return self._try_parent_read_hex('device')
 
         @property
         def parent_subsystem_vendor(self):
-            return self._try_sysfs_read_hex('device/subsystem_vendor')
+            return self._try_parent_read_hex('subsystem_vendor')
 
         @property
         def parent_subsystem_device(self):
-            return self._try_sysfs_read_hex('device/subsystem_device')
+            return self._try_parent_read_hex('subsystem_device')
 
         @property
         def parent_driver(self):
             try:
-                return Path(os.readlink(self._i2c_dev.joinpath('device/driver'))).name
+                return Path(os.readlink(self._parent_device.joinpath('driver'))).name
             except FileNotFoundError:
                 return None
 
@@ -228,6 +228,21 @@ if sys.platform == 'linux':
                    f' {hexid(self.parent_subsystem_vendor)},' \
                    f' parent_subsystem_device: {hexid(self.parent_subsystem_device)},' \
                    f' parent_driver: {self.parent_driver!r}'
+
+        @property
+        def _parent_device(self):
+            # Newer kernels expose the adapter directly below its PCI device,
+            # without the historical adapter/device symlink.
+            legacy = self._i2c_dev.joinpath('device')
+            if legacy.is_dir():
+                return legacy
+            return self._i2c_dev.resolve().parent
+
+        def _try_parent_read_hex(self, name):
+            try:
+                return int(self._parent_device.joinpath(name).read_text(), base=16)
+            except (FileNotFoundError, IsADirectoryError):
+                return None
 
         def _try_sysfs_read(self, *sub, default=None):
             try:

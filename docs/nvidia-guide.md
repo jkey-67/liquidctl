@@ -53,6 +53,7 @@ Jump to the appropriate section for a supported card:
     - [ASUS Strix RTX 2080 Ti][asus-gtx-rtx]
 * _Series 30/Ampere:_
     - [ASUS TUF RTX 3060 Ti OC][asus-gtx-rtx]
+    - [ASUS Strix RTX 3070 Ti OC](#asus-strix-rtx-3070-ti-oc)
 * _[Inherent unsafeness of I²C]_
 
 
@@ -184,6 +185,54 @@ allows for them.
 ```
 
 Note: The `off` mode is simply an alias for `fixed 000000`.
+
+
+## ASUS Strix RTX 3070 Ti OC
+
+The ENE driver targets PCI device `10de:2482` with subsystem `1043:880e`,
+using I²C address `0x67`. It supports RGB lighting on Linux with the NVIDIA
+proprietary driver. It does not control fans. Enable `--unsafe=smbus` and
+provide read/write access to the GPU's `/dev/i2c-*` device.
+
+The protocol is adapted from [OpenRGB's ENE controller](https://github.com/CalcProgrammer1/OpenRGB/tree/4d17bac5b8f34746847e25bd42189cde8014f0cc/Controllers/ENESMBusController).
+The driver verifies the ENE signature, firmware `AUMA0-E6K5-0107`, and LED
+count before configuring lighting. Other firmware versions are rejected.
+Detection and fixed-color register readback have been verified on a physical
+card reporting 22 LEDs. Effects and per-LED output still need visual verification.
+
+```sh
+liquidctl --match 'ASUS Strix RTX 3070 Ti OC' --unsafe=smbus initialize
+liquidctl --match 'ASUS Strix RTX 3070 Ti OC' --unsafe=smbus set led color fixed ff8000
+liquidctl --match 'ASUS Strix RTX 3070 Ti OC' --unsafe=smbus set led color rainbow
+liquidctl --match 'ASUS Strix RTX 3070 Ti OC' --unsafe=smbus status --verbose
+```
+
+The `led` channel supports `off`, `fixed`, `breathing`, `flash`,
+`spectrum-cycle`, `rainbow`, `rainbow-breathing`, `chase-fade`,
+`rainbow-chase-fade`, `chase`, `rainbow-chase`, `random-flicker`, and `direct`.
+`fixed`, `breathing`, `flash`, `chase-fade`, `chase`, and `direct` require
+one color for all LEDs, or exactly one color for each LED. Initialization
+reports the LED count. Other modes require no colors.
+
+Use `--speed=slowest|slow|normal|fast|fastest` (default `normal`) and
+`--direction=forward|backward` (default `forward`) for effects. Direction
+applies to moving effects. Direct mode writes colors without an onboard effect.
+Verbose status reports the mode and the first LED's color when applicable.
+
+When running a modified source checkout, use `python -m liquidctl` from its
+root directory with a Python installation that has liquidctl's dependencies.
+An installed `liquidctl` executable may still run the unmodified system package.
+For example, on systems with those dependencies installed for system Python:
+
+```sh
+/usr/bin/python -m liquidctl --bus i2c-1 --match 'ASUS Strix RTX 3070 Ti OC' --unsafe=smbus set led color fixed ff8000
+```
+
+Replace `i2c-1` with the bus reported by `python -m liquidctl list --verbose`.
+
+Settings are volatile by default. `--non-volatile` explicitly saves an effect
+to controller memory, whose write endurance is unknown; direct mode cannot
+be saved. Avoid running another RGB controller application concurrently.
 
 
 ## Inherent unsafeness of I2C

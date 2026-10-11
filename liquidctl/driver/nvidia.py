@@ -104,6 +104,7 @@ ASUS_STRIX_RTX_2080_O8G = 0x865f
 ASUS_STRIX_RTX_2080_TI_11G = 0x8687
 ASUS_STRIX_RTX_2080_TI_OC = 0x866a
 ASUS_TUF_RTX_3060_TI_O8G_OC = 0x87c6
+ASUS_STRIX_RTX_3070_TI_O8G_OC = 0x880e
 
 # subsystem vendor EVGA, subsystem devices
 # PCI_SUBSYS_ID = [subsystem vendor]:[subsystem device] - use hwinfo to inspect
@@ -541,3 +542,141 @@ class RogTuring(SmbusDriver, _NvidiaI2CDriver):
     def set_screen(self, channel, mode, value, **kwargs):
         """Not supported by this device."""
         raise NotSupportedByDevice()
+
+
+class RogAmpere(RogTuring):
+    """ENE lighting on ASUS Strix RTX 3070 Ti OC (Linux only).
+
+    Protocol adapted from OpenRGB's ENESMBusController and
+    ENESMBusInterface_i2c_smbus, Adam Honse and contributors,
+    GPL-2.0-or-later, revision 4d17bac5b8f34746847e25bd42189cde8014f0cc.
+    """
+
+    _ADDRESSES = [0x67]
+    _MATCHES = [
+        (NVIDIA_RTX_3070_TI, ASUS_STRIX_RTX_3070_TI_O8G_OC,
+         'ASUS Strix RTX 3070 Ti OC'),
+    ]
+
+    @unique
+    class Mode(_ModeEnum):
+        OFF = (0, 0)
+        FIXED = (1, 1)
+        BREATHING = (2, 1)
+        FLASH = (3, 1)
+        SPECTRUM_CYCLE = (4, 0)
+        RAINBOW = (5, 0)
+        RAINBOW_BREATHING = (6, 0)
+        CHASE_FADE = (7, 1)
+        RAINBOW_CHASE_FADE = (8, 0)
+        CHASE = (9, 1)
+        RAINBOW_CHASE = (10, 0)
+        RANDOM_FLICKER = (13, 0)
+        DIRECT = (255, 1)  # selected through 0x8020, not the mode register
+
+    @classmethod
+    def probe(cls, smbus, **kwargs):
+        for _, _, desc in cls.pre_probe(smbus, **kwargs):
+            dev = cls(smbus, desc, vendor_id=ASUS,
+                      product_id=ASUS_STRIX_RTX_3070_TI_O8G_OC, address=0x67)
+            if check_unsafe('smbus', **kwargs):
+                smbus.open()
+                try:
+                    dev._load_config()
+                except (OSError, ValueError) as err:
+                    _LOGGER.debug('%s: ENE probe failed: %s', desc, err)
+                    continue
+                finally:
+                    smbus.close()
+            yield dev
+
+    def _select(self, register):
+        # SMBus words are little endian; ENE expects the high address byte first.
+        self._smbus.write_word_data(self._address, 0x00,
+                                    ((register & 0xff) << 8) | (register >> 8))
+
+    def _read(self, register):
+        self._select(register)
+        return self._smbus.read_byte_data(self._address, 0x81)
+
+    def _write(self, register, value):
+        self._select(register)
+        self._smbus.write_byte_data(self._address, 0x01, value)
+
+    def _load_config(self):
+        if hasattr(self, '_led_count'):
+            return
+        if any(self._smbus.read_byte_data(self._address, 0xa0 + i) != i
+               for i in range(16)):
+            raise ValueError('invalid ENE signature')
+        version = bytes(self._read(0x1000 + i) for i in range(16))
+        version = version.split(b'\0', 1)[0].decode('ascii')
+        if version != 'AUMA0-E6K5-0107':
+            raise ValueError(f'unsupported ENE firmware: {version!r}')
+        count = self._read(0x1c03)
+        if not 1 <= count <= 32:
+            raise ValueError(f'invalid ENE LED count: {count}')
+        self._led_count = count
+        self._firmware = version
+
+    def initialize(self, **kwargs):
+        check_unsafe('smbus', error=True, **kwargs)
+        self._load_config()
+        return [('Firmware version', self._firmware, ''),
+                ('LED count', self._led_count, '')]
+
+    def get_status(self, verbose=False, **kwargs):
+        if not verbose or not check_unsafe('smbus', **kwargs):
+            return []
+        self._load_config()
+        direct = self._read(0x8020)
+        mode = self.Mode.DIRECT if direct else self.Mode(self._read(0x8021))
+        status = [('Mode', mode, '')]
+        if mode.required_colors:
+            base = 0x8100 if direct else 0x8160
+            r, b, g = (self._read(base + i) for i in range(3))
+            status.append(('Color', f'{r:02x}{g:02x}{b:02x}', ''))
+        return status
+
+    def set_color(self, channel, mode, colors, speed='normal', direction='forward',
+                  non_volatile=False, **kwargs):
+        check_unsafe('smbus', error=True, **kwargs)
+        if channel != 'led':
+            raise ValueError(f'invalid channel: {channel!r}')
+        try:
+            mode = self.Mode[mode.replace('-', '_')]
+        except KeyError:
+            raise ValueError(f'invalid mode: {mode!r}') from None
+        speeds = {'slowest': 4, 'slow': 3, 'normal': 2, 'fast': 1, 'fastest': 0}
+        directions = {'forward': 0, 'backward': 1}
+        if speed not in speeds or direction not in directions:
+            raise ValueError('invalid speed or direction')
+        colors = [tuple(color) for color in colors]
+        if len(colors) < mode.required_colors:
+            raise ValueError(f'{mode} mode requires {mode.required_colors} colors')
+        if any(len(c) != 3 or any(not isinstance(v, int) or not 0 <= v <= 255
+                                 for v in c) for c in colors):
+            raise ValueError('colors must contain three bytes')
+        if non_volatile and mode == self.Mode.DIRECT:
+            raise ValueError('direct mode cannot be saved')
+        self._load_config()
+        if mode.required_colors and len(colors) not in (1, self._led_count):
+            raise ValueError(f'expected one color or {self._led_count} LED colors')
+        if mode.required_colors:
+            if len(colors) == 1:
+                colors *= self._led_count
+            base = 0x8100 if mode == self.Mode.DIRECT else 0x8160
+            for led, (r, g, b) in enumerate(colors):
+                # Use the individual byte transport supported by OpenRGB's
+                # fallback, avoiding adapter-specific block transaction limits.
+                for offset, value in enumerate((r, b, g)):
+                    self._write(base + 3 * led + offset, value)
+        if mode != self.Mode.DIRECT:
+            self._write(0x8021, mode.value)
+            self._write(0x8022, speeds[speed])
+            self._write(0x8023, directions[direction])
+            self._write(0x80a0, 0x01)
+        self._write(0x8020, int(mode == self.Mode.DIRECT))
+        self._write(0x80a0, 0x01)
+        if non_volatile:
+            self._write(0x80a0, 0xaa)
